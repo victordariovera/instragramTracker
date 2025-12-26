@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: instagramTracker-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: instagram-tracker
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "27017:27017"
+    networks:
+      - instagram-tracker-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: instagramTracker-backend
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - MONGODB_URI=mongodb://mongodb:27017/instagram-tracker
+      - JWT_SECRET=your-secure-jwt-secret-change-this-in-production
+    ports:
+      - "5000:5000"
+    depends_on:
+      - mongodb
+    networks:
+      - instagram-tracker-network
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: instagramTracker-frontend
+    restart: unless-stopped
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000/api
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - instagram-tracker-network
+
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  instagram-tracker-network:
+    driver: bridge
