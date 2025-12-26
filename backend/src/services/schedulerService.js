@@ -108,7 +108,7 @@ class SchedulerService {
       }
 
       if (!data.success) {
-        const errorMessage = data.error || 'Unknown error';
+        const errorMessage = data.error || data.warning || 'Could not extract data from Instagram';
         await AuditLog.create({
           eventType: 'scraping_failed',
           trackedAccountUsername: account.username,
@@ -118,9 +118,19 @@ class SchedulerService {
           success: false
         });
         
-        // Store error in account for UI display
-        account.lastScrapeError = errorMessage;
-        account.lastScrapeTimestamp = now;
+        // NO guardar error en la cuenta si ya tiene datos (para no mostrar errores innecesarios)
+        // Solo guardar error si la cuenta no tiene datos y el scraping falló
+        if (!account.followersCount && !account.followingCount) {
+          account.lastScrapeError = errorMessage;
+          account.lastScrapeTimestamp = now;
+        } else {
+          // Si ya tiene datos, limpiar errores previos
+          account.lastScrapeError = null;
+          account.lastScrapeTimestamp = null;
+        }
+        
+        // Actualizar lastChecked incluso si falló (para que no diga "hace un día")
+        account.lastChecked = now;
         await account.save();
         
         console.log(`Failed to fetch data for ${account.username}: ${errorMessage}`);
@@ -134,20 +144,31 @@ class SchedulerService {
       const currentFollowersFromDB = account.currentFollowers || [];
       const currentFollowingFromDB = account.currentFollowing || [];
       
-      const newFollowersList = data.followers || [];
-      const newFollowingList = data.following || [];
+      const newFollowersList = Array.isArray(data.followers) ? data.followers : [];
+      const newFollowingList = Array.isArray(data.following) ? data.following : [];
       
       // Detect changes by comparing actual username lists
       const followerChanges = instagramService.detectChanges(currentFollowersFromDB, newFollowersList);
       const followingChanges = instagramService.detectChanges(currentFollowingFromDB, newFollowingList);
+      
+      // Asegurar que los cambios sean objetos con arrays (evitar errores de iteración)
+      const safeFollowerChanges = {
+        added: Array.isArray(followerChanges?.added) ? followerChanges.added : [],
+        removed: Array.isArray(followerChanges?.removed) ? followerChanges.removed : []
+      };
+      
+      const safeFollowingChanges = {
+        added: Array.isArray(followingChanges?.added) ? followingChanges.added : [],
+        removed: Array.isArray(followingChanges?.removed) ? followingChanges.removed : []
+      };
 
       // Update relationships using the relationship service
       // This handles account details fetching, relationship storage, and mutual updates
       // dateString and hourString already declared above
       const relationshipEvents = await relationshipService.updateRelationships(
         account.username,
-        followerChanges,
-        followingChanges,
+        safeFollowerChanges,
+        safeFollowingChanges,
         now,
         dateString,
         hourString
@@ -158,7 +179,7 @@ class SchedulerService {
       const events = relationshipEvents || [];
 
       // Process follower additions for audit logging
-      for (const username of followerChanges.added) {
+      for (const username of safeFollowerChanges.added) {
         const rels = await relationshipService.getRelationships(account.username, 'follower', 'active');
         const rel = rels.find(r => r.relatedAccountUsername.toLowerCase() === username.toLowerCase());
         
@@ -185,7 +206,7 @@ class SchedulerService {
       }
 
       // Process follower removals
-      for (const username of followerChanges.removed) {
+      for (const username of safeFollowerChanges.removed) {
         const rels = await relationshipService.getRelationships(account.username, 'follower', 'removed');
         const rel = rels.find(r => r.relatedAccountUsername.toLowerCase() === username.toLowerCase());
         
@@ -212,7 +233,7 @@ class SchedulerService {
       }
 
       // Process following additions
-      for (const username of followingChanges.added) {
+      for (const username of safeFollowingChanges.added) {
         const rels = await relationshipService.getRelationships(account.username, 'following', 'active');
         const rel = rels.find(r => r.relatedAccountUsername.toLowerCase() === username.toLowerCase());
         
@@ -239,7 +260,7 @@ class SchedulerService {
       }
 
       // Process following removals
-      for (const username of followingChanges.removed) {
+      for (const username of safeFollowingChanges.removed) {
         const rels = await relationshipService.getRelationships(account.username, 'following', 'removed');
         const rel = rels.find(r => r.relatedAccountUsername.toLowerCase() === username.toLowerCase());
         
@@ -271,8 +292,29 @@ class SchedulerService {
       }
 
       // Store counts and actual follower/following lists
-      account.followersCount = data.followersCount || 0;
-      account.followingCount = data.followingCount || 0;
+      // Update counts if we got new data (even if 0, to reflect current state)
+      if (data.followersCount !== undefined && data.followersCount !== null) {
+        account.followersCount = data.followersCount;
+      }
+      if (data.followingCount !== undefined && data.followingCount !== null) {
+        account.followingCount = data.followingCount;
+      }
+      if (data.postsCount !== undefined && data.postsCount !== null) {
+        account.postsCount = data.postsCount;
+      }
+      
+      // Update other fields if available
+      if (data.displayName) account.displayName = data.displayName;
+      if (data.profilePhoto && !data.profilePhoto.includes('rsrc.php')) {
+        // Solo actualizar si no es una imagen por defecto de Instagram
+        account.profilePhoto = data.profilePhoto;
+      }
+      if (data.description) account.description = data.description;
+      
+      // Clear any previous errors on successful scrape
+      account.lastScrapeError = null;
+      account.lastScrapeTimestamp = null;
+      account.lastChecked = now;
       
       // Update follower/following lists if we got actual data
       if (data.followers && data.followers.length > 0) {

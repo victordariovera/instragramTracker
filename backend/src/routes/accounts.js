@@ -21,11 +21,6 @@ router.get('/', async (req, res) => {
     // Use toObject() to ensure all fields are included, including ones added after schema creation
     const accountsWithCounts = accounts.map(account => {
       const accountObj = account.toObject();
-      // Debug logging
-      if (accountObj.username === 'w3stwalker') {
-        console.log('DEBUG w3stwalker - accountObj.followersCount:', accountObj.followersCount, 'type:', typeof accountObj.followersCount);
-        console.log('DEBUG w3stwalker - account.followersCount:', account.followersCount, 'type:', typeof account.followersCount);
-      }
       return {
         username: accountObj.username,
         displayName: accountObj.displayName,
@@ -40,7 +35,14 @@ router.get('/', async (req, res) => {
       };
     });
     
+    // Create a map of accounts with their counts for quick lookup
+    const accountsDataMap = new Map();
+    accountsWithCounts.forEach(acc => {
+      accountsDataMap.set(acc.username, acc);
+    });
+    
     // Get last scraping error for each account
+    // BUT only show errors for accounts that don't have data (to avoid showing errors unnecessarily)
     const accountErrors = await AuditLog.find({
       eventType: 'scraping_failed',
       trackedAccountUsername: { $in: accounts.map(a => a.username) },
@@ -51,7 +53,18 @@ router.get('/', async (req, res) => {
         const errorMap = new Map();
         logs.forEach(log => {
           if (!errorMap.has(log.trackedAccountUsername)) {
-            errorMap.set(log.trackedAccountUsername, log);
+            // Only include error if account doesn't have data
+            const accountData = accountsDataMap.get(log.trackedAccountUsername);
+            if (accountData) {
+              const hasData = (accountData.followersCount && accountData.followersCount > 0) || (accountData.followingCount && accountData.followingCount > 0);
+              // Only show error if account has NO data
+              if (!hasData) {
+                errorMap.set(log.trackedAccountUsername, log);
+              }
+            } else {
+              // If account not found in map, include error (shouldn't happen)
+              errorMap.set(log.trackedAccountUsername, log);
+            }
           }
         });
         return errorMap;

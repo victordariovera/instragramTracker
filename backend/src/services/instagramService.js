@@ -5,11 +5,16 @@ const InstagramAccount = require('../models/InstagramAccount');
 class InstagramService {
   constructor() {
     this.baseURL = 'https://www.instagram.com';
-    // Use minimal headers to avoid detection - same as test script that worked
+    // Headers mínimos que funcionaron antes (más efectivos para evitar detección)
     this.headers = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1'
     };
-    this.rateLimitDelay = 3000; // 3 seconds between requests to avoid rate limiting
+    this.rateLimitDelay = 2000; // 2 seconds between requests
     this.lastRequestTime = 0;
     this.rateLimitError = false;
   }
@@ -72,25 +77,32 @@ class InstagramService {
       // Load cheerio early for meta tag extraction
       const $ = cheerio.load(html);
       
-      // PRIMARY METHOD: Use cheerio to extract og:description (proven to work in testing)
+      // PRIMARY METHOD: Usar cheerio para extraer og:description (método que funcionó)
       let metaContent = null;
       
-      // Try to extract og:description using cheerio (most reliable)
+      // Intentar con cheerio primero
       const metaTags = $('meta[property="og:description"]');
+      console.log(`Cheerio encontró ${metaTags.length} meta tags con og:description`);
       
       if (metaTags.length > 0) {
         metaContent = metaTags.first().attr('content');
         if (metaContent) {
-          console.log(`✅ Found og:description via cheerio`);
+          console.log(`✅ Encontrado og:description via cheerio, longitud: ${metaContent.length}`);
         }
       }
       
-      // Fallback to regex if cheerio didn't work
+      // Fallback a regex si cheerio no funcionó
       if (!metaContent) {
+        console.log('Cheerio falló, intentando con regex...');
         const regexMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["'][^>]*>/i);
         if (regexMatch && regexMatch[1]) {
           metaContent = regexMatch[1];
-          console.log(`✅ Found og:description via regex`);
+          console.log(`✅ Encontrado og:description via regex, longitud: ${metaContent.length}`);
+        } else {
+          // Verificar si Instagram está bloqueando
+          if (html.includes('Log in') || html.includes('login') || html.length < 200000) {
+            console.log(`⚠️ Instagram puede estar bloqueando - HTML length: ${html.length}`);
+          }
         }
       }
       
@@ -123,7 +135,42 @@ class InstagramService {
         }
       }
       
-      // FALLBACK: Decode HTML and search directly
+      // FALLBACK 2: Buscar directamente en el HTML usando regex (método más rápido y confiable)
+      if (followersCount === 0 && followingCount === 0) {
+        try {
+          console.log('Buscando patrones directamente en HTML...');
+          
+          // Buscar edge_followed_by y edge_follow en el HTML completo (método más directo)
+          const followerMatch = html.match(/"edge_followed_by":\s*\{[^}]*"count":\s*(\d+)/);
+          const followingMatch = html.match(/"edge_follow":\s*\{[^}]*"count":\s*(\d+)/);
+          const postsMatch = html.match(/"edge_owner_to_timeline_media":\s*\{[^}]*"count":\s*(\d+)/);
+          
+          if (followerMatch && followerMatch[1]) {
+            followersCount = parseInt(followerMatch[1]) || 0;
+            console.log(`✅ Encontrado followers desde regex directo: ${followersCount}`);
+          }
+          
+          if (followingMatch && followingMatch[1]) {
+            followingCount = parseInt(followingMatch[1]) || 0;
+            console.log(`✅ Encontrado following desde regex directo: ${followingCount}`);
+          }
+          
+          if (postsMatch && postsMatch[1]) {
+            postsCount = parseInt(postsMatch[1]) || 0;
+            console.log(`✅ Encontrado posts desde regex directo: ${postsCount}`);
+          }
+          
+          if (followersCount > 0 || followingCount > 0) {
+            console.log(`✅ Encontrado desde regex directo: ${followersCount} seguidores, ${followingCount} siguiendo, ${postsCount} posts`);
+          } else {
+            console.log('⚠️ No se encontraron patrones edge_followed_by o edge_follow en el HTML');
+          }
+        } catch (e) {
+          console.log(`Error en búsqueda regex: ${e.message}`);
+        }
+      }
+      
+      // FALLBACK 3: Decode HTML and search directly
       if (followersCount === 0 && followingCount === 0) {
         const decodedHtml = html
           .replace(/&#(\d+);/g, (match, dec) => String.fromCharCode(parseInt(dec, 10)))
@@ -138,78 +185,66 @@ class InstagramService {
           followersCount = parseInt(statsPattern[1].replace(/,/g, '')) || 0;
           followingCount = parseInt(statsPattern[2].replace(/,/g, '')) || 0;
           postsCount = statsPattern[3] ? parseInt(statsPattern[3].replace(/,/g, '')) || 0 : 0;
-          console.log(`✅ Found from decoded HTML: ${followersCount} followers, ${followingCount} following, ${postsCount} posts`);
+          console.log(`✅ Encontrado desde HTML decodificado: ${followersCount} seguidores, ${followingCount} siguiendo, ${postsCount} posts`);
         }
       }
       
-      // If still no data, try JSON extraction from script tags (Instagram's new structure)
+      // FALLBACK 3: Buscar exhaustivamente en TODOS los script tags (Instagram ahora usa diferentes estructuras)
       if (followersCount === 0 && followingCount === 0) {
         try {
-          // Try to find JSON-LD or window._sharedData
-          const jsonLdMatch = html.match(/<script[^>]*type=["']application\/ld\+json["'][^>]*>(.*?)<\/script>/s);
-          if (jsonLdMatch) {
-            try {
-              const jsonLd = JSON.parse(jsonLdMatch[1]);
-              if (jsonLd['@type'] === 'Person' || jsonLd.mainEntityOfPage) {
-                // Extract from JSON-LD if available
-                console.log('Found JSON-LD data');
-              }
-            } catch (e) {
-              console.log('JSON-LD parse failed:', e.message);
-            }
-          }
-
-          // Try window._sharedData pattern (Instagram's internal data)
-          const sharedDataMatch = html.match(/window\._sharedData\s*=\s*({.+?});/s);
-          if (sharedDataMatch) {
-            try {
-              const sharedData = JSON.parse(sharedDataMatch[1]);
-              const user = sharedData?.entry_data?.ProfilePage?.[0]?.graphql?.user;
-              if (user) {
-                followersCount = user.edge_followed_by?.count || 0;
-                followingCount = user.edge_follow?.count || 0;
-                postsCount = user.edge_owner_to_timeline_media?.count || 0;
-                profilePhoto = user.profile_pic_url_hd || user.profile_pic_url || '';
-                description = user.biography || '';
-                displayName = user.full_name || username;
-                console.log(`✅ Found from _sharedData: ${followersCount} followers, ${followingCount} following, ${postsCount} posts`);
-              }
-            } catch (e) {
-              console.log('_sharedData parse failed:', e.message);
-            }
-          }
-
-          // Try to find data in script tags with type="application/json"
-          if (followersCount === 0 && followingCount === 0) {
-            const scriptMatches = html.match(/<script[^>]*type=["']application\/json["'][^>]*>(.*?)<\/script>/gs);
-            if (scriptMatches) {
-              for (const scriptMatch of scriptMatches) {
-                try {
-                  const jsonContent = scriptMatch.replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
-                  const data = JSON.parse(jsonContent);
+          // Buscar en todos los script tags, no solo application/json
+          const allScripts = html.match(/<script[^>]*>(.*?)<\/script>/gs);
+          if (allScripts) {
+            console.log(`Buscando en ${allScripts.length} script tags...`);
+            for (let i = 0; i < allScripts.length; i++) {
+              try {
+                const scriptContent = allScripts[i].replace(/<script[^>]*>/, '').replace(/<\/script>/, '');
+                
+                // Buscar patrones de datos de usuario en el contenido del script
+                // Patrón 1: edge_followed_by
+                const followerMatch = scriptContent.match(/"edge_followed_by":\s*\{[^}]*"count":\s*(\d+)/);
+                const followingMatch = scriptContent.match(/"edge_follow":\s*\{[^}]*"count":\s*(\d+)/);
+                const postsMatch = scriptContent.match(/"edge_owner_to_timeline_media":\s*\{[^}]*"count":\s*(\d+)/);
+                
+                if (followerMatch || followingMatch) {
+                  if (followerMatch) followersCount = parseInt(followerMatch[1]) || 0;
+                  if (followingMatch) followingCount = parseInt(followingMatch[1]) || 0;
+                  if (postsMatch) postsCount = parseInt(postsMatch[1]) || 0;
                   
-                  // Try different data structures
-                  const user = data?.entry_data?.ProfilePage?.[0]?.graphql?.user ||
-                              data?.graphql?.user ||
-                              data?.user ||
-                              data?.data?.user;
-                  
-                  if (user) {
-                    followersCount = user.edge_followed_by?.count || user.follower_count || user.followers_count || 0;
-                    followingCount = user.edge_follow?.count || user.following_count || 0;
-                    postsCount = user.edge_owner_to_timeline_media?.count || user.media_count || user.posts_count || 0;
-                    profilePhoto = user.profile_pic_url_hd || user.profile_pic_url || user.profile_picture || '';
-                    description = user.biography || user.bio || '';
-                    displayName = user.full_name || user.name || username;
-                    
-                    if (followersCount > 0 || followingCount > 0) {
-                      console.log(`✅ Found from JSON script: ${followersCount} followers, ${followingCount} following, ${postsCount} posts`);
-                      break;
-                    }
+                  if (followersCount > 0 || followingCount > 0) {
+                    console.log(`✅ Encontrado desde script tag ${i} (patrón regex): ${followersCount} seguidores, ${followingCount} siguiendo`);
+                    break;
                   }
-                } catch (e) {
-                  // Continue to next script tag
                 }
+                
+                // Patrón 2: Intentar parsear como JSON si parece JSON
+                if (scriptContent.trim().startsWith('{') && scriptContent.length > 100) {
+                  try {
+                    const data = JSON.parse(scriptContent);
+                    const user = data?.entry_data?.ProfilePage?.[0]?.graphql?.user ||
+                                data?.graphql?.user ||
+                                data?.user ||
+                                data?.data?.user;
+                    
+                    if (user && (user.edge_followed_by || user.follower_count)) {
+                      followersCount = user.edge_followed_by?.count || user.follower_count || user.followers_count || 0;
+                      followingCount = user.edge_follow?.count || user.following_count || 0;
+                      postsCount = user.edge_owner_to_timeline_media?.count || user.media_count || user.posts_count || 0;
+                      profilePhoto = user.profile_pic_url_hd || user.profile_pic_url || user.profile_picture || '';
+                      description = user.biography || user.bio || '';
+                      displayName = user.full_name || user.name || username;
+                      
+                      if (followersCount > 0 || followingCount > 0) {
+                        console.log(`✅ Encontrado desde script tag ${i} (JSON): ${followersCount} seguidores, ${followingCount} siguiendo`);
+                        break;
+                      }
+                    }
+                  } catch (e) {
+                    // No es JSON válido, continuar
+                  }
+                }
+              } catch (e) {
+                // Continuar al siguiente script
               }
             }
           }
@@ -246,8 +281,14 @@ class InstagramService {
       }
 
       // Use cheerio (already loaded) for other extractions
-      if (!profilePhoto) {
-        profilePhoto = $('meta[property="og:image"]').attr('content') || '';
+      // PRIORIDAD: Extraer imagen de perfil desde og:image (siempre disponible)
+      const ogImage = $('meta[property="og:image"]').attr('content');
+      if (ogImage && ogImage.includes('instagram.com') && !ogImage.includes('rsrc.php')) {
+        profilePhoto = ogImage;
+        console.log(`✅ Imagen de perfil encontrada desde og:image: ${profilePhoto.substring(0, 80)}...`);
+      } else if (!profilePhoto) {
+        // Fallback a otros métodos si og:image no está disponible o es una imagen por defecto
+        profilePhoto = ogImage || '';
       }
       
       if (displayName === username) {
